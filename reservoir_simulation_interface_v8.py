@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 
 st.set_page_config(page_title="Reservoir Simulation", layout="wide")
 
-
 # -------------------------
 # Helper: Corey relative permeability
 # -------------------------
@@ -18,22 +17,10 @@ def corey_relperm(Sw, Swc, krw0, kro0, nw, no):
 
 
 # -------------------------
-# Implicit transient aquifer solver + reservoir coupling
+# Reservoir + Aquifer Coupled Simulator
 # -------------------------
 def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=20):
-    """
-    Reservoir simulation with a fully implicit radial transient aquifer solver,
-    coupled iteratively to the reservoir material balance each timestep.
-
-    params must include keys:
-      J, N, Bo, Bw, Rs, Pi, Pwf, ct, mu_o, mu_w,
-      krw0,kro0,nw,no,Swc  (or relperm_table),
-      k_aq, h_aq, re, cw, porosity, rw
-    Nr = number of radial cells for aquifer
-    tol_couple = convergence tolerance (psi) for inner coupling iteration
-    max_iter = max iterations per timestep for reservoir<->aquifer coupling
-    """
-    # Unpack parameters with defaults
+    # Unpack parameters
     J = float(params.get('J', 1e-5))
     N = float(params.get('N', 1e6))
     Bo = float(params.get('Bo', 1.2))
@@ -53,12 +40,12 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
     Swc = float(params.get('Swc', 0.2))
 
     # Aquifer params
-    k_aq = float(params.get('k_aq', 100.0))  # md
-    h_aq = float(params.get('h_aq', 50.0))   # ft
-    re = float(params.get('re', 2000.0))     # ft
-    cw = float(params.get('cw', 1e-6))       # 1/psi
+    k_aq = float(params.get('k_aq', 100.0))
+    h_aq = float(params.get('h_aq', 50.0))
+    re = float(params.get('re', 2000.0))
+    cw = float(params.get('cw', 1e-6))
     porosity = float(params.get('porosity', 0.25))
-    rw = float(params.get('rw', 0.25))       # ft
+    rw = float(params.get('rw', 0.25))
 
     # Time discretization (days)
     time = np.linspace(0.0, 365.0, 50)
@@ -70,7 +57,7 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
     Sw = Swc
     PV_reservoir = max(N * Bo / max(1e-12, (1.0 - Swc)), 1.0)
 
-    # Prepares relperm arrays
+    # Relperm table
     if relperm_table is not None:
         relperm_table_sorted = relperm_table.sort_values('Sw')
         sw_array = relperm_table_sorted['Sw'].values
@@ -79,7 +66,7 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
     else:
         sw_array = krw_array = kro_array = None
 
-    # Aquifer radial grid (geometric spacing)
+    # Aquifer radial grid
     r_edges = np.geomspace(rw, re, Nr + 1)
     r_centers = 0.5 * (r_edges[:-1] + r_edges[1:])
     dr = np.diff(r_edges)
@@ -91,8 +78,7 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
     We_cum = 0.0
 
     # engineering constants
-    conv_factor = 0.00708  # used to convert to STB/day
-    ft3_per_STB = 5.615
+    conv_factor = 0.00708  # convert to STB/day from Darcy-based transmissivity
 
     # history arrays
     oil_rates = []
@@ -101,37 +87,27 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
     pressures = []
     Sw_history = []
 
-    # helper: construct tridiagonal matrix for implicit solve given transmissivities,
-    # but inner boundary treatment will use reservoir pressure (Dirichlet-like via flux)
     for step, dt in enumerate(dt_days):
-        # start coupling iterations
-        # initial guess for reservoir pressure = previous pressure or Pi if first step
-        if len(pressures) == 0:
-            P_res_guess = Pi
-        else:
-            P_res_guess = pressures[-1]
-
+        # coupling loop
+        P_res_guess = Pi if len(pressures) == 0 else pressures[-1]
         iter_count = 0
         converged = False
 
-        # We will use the guessed P_res to compute q_oil, q_water for the timestep
-        # inside the coupling loop we allow q to be updated if P_res changes significantly by using the updated guess each iter.
-
         while (not converged) and (iter_count < max_iter):
-            # compute kr from current Sw (use the Sw from previous step; production within step is small)
+            # relative permeability
             if relperm_table is not None:
                 krw = float(np.interp(Sw, sw_array, krw_array, left=krw_array[0], right=krw_array[-1]))
                 kro = float(np.interp(Sw, sw_array, kro_array, left=kro_array[0], right=kro_array[-1]))
             else:
                 krw, kro = corey_relperm(Sw, Swc, krw0, kro0, nw, no)
 
-            # mobilities and fractional flow (based on current Sw)
+            # mobilities & fractional flow
             lambda_w = krw / max(mu_w, 1e-6)
             lambda_o = kro / max(mu_o, 1e-6)
             denom = lambda_w + lambda_o
             fw = float(np.clip(lambda_w / denom if denom > 0 else 0.0, 1e-6, 0.999999))
 
-            # compute q_oil using current P_res_guess
+            # production from P_res_guess
             q_oil = J * max(P_res_guess - Pwf, 0.0) / Bo
             q_oil = max(q_oil, 0.0)
             q_water = q_oil * fw / (1.0 - fw)
@@ -141,40 +117,30 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
             produced_oil = q_oil * dt
             produced_water = q_water * dt
 
-            # Predict Np used for MB update after influx is computed:
             Np_trial = Np + produced_oil
 
-            # Build implicit aquifer linear system: A * P_next = b
-            # Mass balance (implicit): phi * V * cw * (P_i^{n+1} - P_i^n) / dt = Q_in^{n+1}  (with Q in STB/day)
-            # Q faces expressed as -T_face * (P_j^{n+1} - P_i^{n+1})/delta_r
-            # Rearranging gives a tridiagonal system for P^{n+1}.
-
+            # Build implicit aquifer matrix A * P_next = b
             A = np.zeros((Nr, Nr))
             b = np.zeros(Nr)
 
             for i in range(Nr):
-                # cell geometry
                 r_i = r_edges[i]
                 r_e = r_edges[i + 1]
                 V_cell_ft3 = np.pi * (r_e ** 2 - r_i ** 2) * h_aq
                 pore_vol_ft3 = V_cell_ft3 * porosity
-                storage_coef = pore_vol_ft3 * cw  # ft^3 * 1/psi -> ft^3/psi
+                storage_coef = pore_vol_ft3 * cw
 
-                # left transmissivity (face i between i-1 and i); for i=0 left face is inner face to reservoir
+                # left transmissivity
                 if i == 0:
                     rface_left = r_edges[0]
                     T_left = conv_factor * k_aq * h_aq / max(mu_w, 1e-6) * (2.0 * np.pi * rface_left)
                     delta_r_left = r_centers[0] - r_edges[0]
-                    # flux at inner face = -T_left * (P_aq0^{n+1} - P_res_guess) / delta_r_left
-                    # bring the term with P_aq0^{n+1} to matrix; P_res_guess moves to RHS
-                    coef_center = T_left / max(delta_r_left, 1e-12)
-                    # We'll add center and left contributions below
                 else:
                     rface_left = r_edges[i]
                     T_left = conv_factor * k_aq * h_aq / max(mu_w, 1e-6) * (2.0 * np.pi * rface_left)
                     delta_r_left = 0.5 * dr[i - 1] + 0.5 * dr[i]
 
-                # right transmissivity (face i+1 between i and i+1); for i = Nr-1 the right face uses outer boundary Pi
+                # right transmissivity
                 if i == Nr - 1:
                     rface_right = r_edges[-1]
                     T_right = conv_factor * k_aq * h_aq / max(mu_w, 1e-6) * (2.0 * np.pi * rface_right)
@@ -184,75 +150,56 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
                     T_right = conv_factor * k_aq * h_aq / max(mu_w, 1e-6) * (2.0 * np.pi * rface_right)
                     delta_r_right = 0.5 * dr[i] + 0.5 * dr[i + 1]
 
-                # Diagonal and off-diagonals build
-                # center coefficient accumulates storage/dt + transmissivity terms
-                center = storage_coef / max(dt, 1e-12)  # storage term
+                center = storage_coef / max(dt, 1e-12)
                 left_coef = T_left / max(delta_r_left, 1e-12)
                 right_coef = T_right / max(delta_r_right, 1e-12)
-                # accumulate into A
                 center += left_coef + right_coef
 
                 A[i, i] = center
-                # left neighbor
                 if i > 0:
                     A[i, i - 1] = -left_coef
-                # right neighbor
                 if i < Nr - 1:
                     A[i, i + 1] = -right_coef
 
-                # RHS b: storage*P_old + boundary contributions (inner and outer face using known boundary pressures)
-                b_i = (storage_coef / max(dt, 1e-12)) * P_aq[i]  # storage * P_old
-
-                # inner boundary contribution (i==0) moves P_res_guess term to RHS
+                b_i = (storage_coef / max(dt, 1e-12)) * P_aq[i]
                 if i == 0:
-                    # inner flux term contribution to RHS: left_coef * P_res_guess
                     b_i += left_coef * P_res_guess
-                # outer boundary (i == Nr-1): outer boundary fixed at Pi -> right face contributes right_coef * Pi
                 if i == Nr - 1:
                     b_i += right_coef * Pi
-
                 b[i] = b_i
 
-            # Solve linear system for P_aq_next
+            # solve for P_aq_next
             try:
                 P_aq_next = np.linalg.solve(A, b)
             except np.linalg.LinAlgError:
-                # fallback: small perturbation to diagonal then solve
                 A += np.eye(Nr) * 1e-12
                 P_aq_next = np.linalg.solve(A, b)
 
-            # compute inner-face flux Q_inner (STB/day) using P_aq_next[0] and P_res_guess
+            # inner-face flux
             delta_r_inner = r_centers[0] - r_edges[0]
             r_face_inner = r_edges[0]
             T_inner = conv_factor * k_aq * h_aq / max(mu_w, 1e-6) * (2.0 * np.pi * r_face_inner)
             Q_inner = - T_inner * (P_aq_next[0] - P_res_guess) / max(delta_r_inner, 1e-12)  # STB/day
-            # We_step is influx (STB) during this timestep
             We_step = Q_inner * dt
-            # update We cumulative trial
             We_trial = We_cum + We_step
 
-            # compute updated reservoir pressure from MB using Np_trial and We_trial
+            # reservoir material balance -> new reservoir pressure
             P_res_new = Pi - ((Np_trial * Bo - We_trial * Bw) / (N * ct))
             P_res_new = max(P_res_new, Pwf)
 
-            # check convergence in psi
             if abs(P_res_new - P_res_guess) < tol_couple:
                 converged = True
             else:
                 P_res_guess = P_res_new
                 iter_count += 1
-                # assign P_aq = P_aq_next for next iteration's storage term to be meaningful
-                # (the A matrix uses P_aq from previous in b; good to update)
                 P_aq = P_aq_next.copy()
 
-        # end coupling loop: accept P_aq_next, P_res_new, We_step
-        # update global states using the last computed values
+        # Accept values after coupling
         P_aq = P_aq_next.copy()
         P_res = P_res_new
         We_cum += We_step
 
-        # finalize production increments using P_res used in last iteration (P_res)
-        # compute kr/fw again (based on current Sw)
+        # finalize production increments using P_res
         if relperm_table is not None:
             krw = float(np.interp(Sw, sw_array, krw_array, left=krw_array[0], right=krw_array[-1]))
             kro = float(np.interp(Sw, sw_array, kro_array, left=kro_array[0], right=kro_array[-1]))
@@ -273,11 +220,9 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
         produced_oil = q_oil * dt
         produced_water = q_water * dt
 
-        # update cumulative production globals
         Np += produced_oil
         Nw += produced_water
 
-        # update Sw
         produced_water_rb = produced_water * Bw
         dSw = produced_water_rb / PV_reservoir
         Sw = float(np.clip(Sw + dSw, Swc, 0.95))
@@ -289,7 +234,6 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
         gas_rates.append(q_gas)
         Sw_history.append(Sw)
 
-    # final DataFrame
     return pd.DataFrame({
         'Time (days)': time,
         'ReservoirPressure_psi': pressures,
@@ -301,7 +245,7 @@ def run_simulation(params, relperm_table=None, Nr=60, tol_couple=1e-3, max_iter=
 
 
 # -------------------------
-# Streamlit UI: tabs for PVT, RelPerm, Aquifer, History matching
+# Streamlit Interface
 # -------------------------
 tab_pvt, tab_relperm, tab_aquifer, tab_history = st.tabs([
     "🧪 PVT Properties",
@@ -317,13 +261,10 @@ with tab_pvt:
     Bo = col1.number_input("Oil Formation Volume Factor (Bo, rb/stb)", value=1.2)
     mu_o = col2.number_input("Oil Viscosity (cp)", value=1.5)
     Rs = col3.number_input("Solution GOR (scf/stb)", value=600.0)
-
     col4, col5 = st.columns(2)
     Bw = col4.number_input("Water FVF (Bw, rb/stb)", value=1.0)
     mu_w = col5.number_input("Water Viscosity (cp)", value=0.5)
-
     st.markdown("> ✅ These PVT parameters will be passed into the simulation model.")
-
 
 # Relative permeability tab
 with tab_relperm:
@@ -337,11 +278,9 @@ with tab_relperm:
         krw0 = col1.number_input("Endpoint krw0", value=0.3)
         kro0 = col2.number_input("Endpoint kro0", value=0.9)
         nw = col3.number_input("Water exponent (nw)", value=3.0)
-
         col4, col5 = st.columns(2)
         no = col4.number_input("Oil exponent (no)", value=2.0)
         Swc = col5.number_input("Connate Water Saturation (Swc)", value=0.2)
-
         st.markdown("> ✅ Corey parameters defined for internal kr generation.")
     else:
         uploaded_relperm = st.file_uploader("Upload RelPerm Table (Sw, krw, kro, optional)", type="csv")
@@ -350,7 +289,6 @@ with tab_relperm:
             st.dataframe(relperm_table.head())
         else:
             st.info("No table uploaded. You can still use Corey correlations.")
-
 
 # Aquifer tab
 with tab_aquifer:
@@ -362,12 +300,8 @@ with tab_aquifer:
     col4, col5 = st.columns(2)
     cw = col4.number_input("Water Compressibility (1/psi)", value=1e-6, format="%.1e")
     porosity = col5.number_input("Aquifer Porosity", value=0.25)
-
-    # wellbore radius input (small value)
     rw = st.number_input("Wellbore Radius (rw, ft)", value=0.25, step=0.01, format="%.2f")
-
     st.markdown("> ✅ Aquifer parameters will be used in the implicit transient aquifer solver.")
-
 
 # History matching tab
 with tab_history:
@@ -427,15 +361,32 @@ with tab_history:
     w_water = col_w2.number_input("Water Weight", value=0.3, step=0.1)
     w_gas = col_w3.number_input("Gas Weight", value=0.2, step=0.1)
 
-    # optimization bounds & guess (optimizing J, N, k_aq, h_aq, re)
-    param_bounds = [(1e-6, 1e-3), (1e5, 1e7), (1.0, 1e5), (1.0, 1e3), (100.0, 1e5)]
-    initial_guess = [
-        model_params['J'],
-        model_params['N'],
-        model_params['k_aq'],
-        model_params['h_aq'],
-        model_params['re']
-    ]
+    # ---- New: User-defined parameter bounds ----
+    st.subheader("⚙️ Optimization Parameters and Bounds")
+    col1, col2, col3 = st.columns(3)
+    J_min = col1.number_input("Min J", value=1e-6, format="%.1e")
+    J_max = col1.number_input("Max J", value=1e-3, format="%.1e")
+    N_min = col2.number_input("Min N", value=1e5, format="%.1e")
+    N_max = col2.number_input("Max N", value=1e7, format="%.1e")
+    k_min = col3.number_input("Min k_aq", value=1.0)
+    k_max = col3.number_input("Max k_aq", value=1e5)
+    col4, col5 = st.columns(2)
+    h_min = col4.number_input("Min h_aq", value=1.0)
+    h_max = col4.number_input("Max h_aq", value=1e3)
+    re_min = col5.number_input("Min re", value=100.0)
+    re_max = col5.number_input("Max re", value=1e5)
+    param_bounds = [(J_min, J_max), (N_min, N_max), (k_min, k_max), (h_min, h_max), (re_min, re_max)]
+
+    # ---- Optional: Initial guess inputs ----
+    st.markdown("Optionally set initial guesses for the optimizer:")
+    colg1, colg2, colg3 = st.columns(3)
+    J_init = colg1.number_input("Initial J", value=model_params['J'], format="%.1e")
+    N_init = colg2.number_input("Initial N", value=model_params['N'], format="%.1e")
+    k_init = colg3.number_input("Initial k_aq", value=model_params['k_aq'])
+    colg4, colg5 = st.columns(2)
+    h_init = colg4.number_input("Initial h_aq", value=model_params['h_aq'])
+    re_init = colg5.number_input("Initial re", value=model_params['re'])
+    initial_guess = [J_init, N_init, k_init, h_init, re_init]
 
     progress_bar = st.progress(0)
     phase_metrics = st.empty()
@@ -445,6 +396,7 @@ with tab_history:
     # Objective function for optimizer
     def objective(params_arr):
         Jv, Nv, k_aq_v, h_aq_v, re_v = params_arr
+        # Update model params (use floats)
         model_params['J'] = float(Jv)
         model_params['N'] = float(Nv)
         model_params['k_aq'] = float(k_aq_v)
@@ -467,6 +419,7 @@ with tab_history:
         rmse_water = np.sqrt(np.mean((sim_Qw - hist_water) ** 2))
         rmse_gas = np.sqrt(np.mean((sim_Qg - hist_gas) ** 2))
 
+        # Weighted RMSE combination (root of weighted sum of squares)
         rmse_total = np.sqrt(w_oil * rmse_oil ** 2 + w_water * rmse_water ** 2 + w_gas * rmse_gas ** 2)
 
         progress_data.append({
@@ -477,22 +430,25 @@ with tab_history:
         })
 
         i = len(progress_data)
+        # update progress bar (normalize by an arbitrary cap, e.g., 50 iters)
         progress_bar.progress(min(i / 50, 1.0))
         phase_metrics.markdown(f"**Iteration {i}** — Oil RMSE: {rmse_oil:.2f}, Water RMSE: {rmse_water:.2f}, Gas RMSE: {rmse_gas:.2f}")
         current_rmse_text.write(f"**Total RMSE:** {rmse_total:.4f}")
 
-        return rmse_total
+        return float(rmse_total)
 
     # Run optimization button
     if st.button("Run Optimization"):
-        with st.spinner("Running optimization..."):
-            result = minimize(objective, initial_guess, bounds=param_bounds, method='Nelder-Mead', options={'maxiter': 50})
+        with st.spinner("Running optimization... (this may take a while)"):
+            # Use L-BFGS-B so we respect bounds
+            result = minimize(objective, initial_guess, bounds=param_bounds, method='L-BFGS-B', options={'maxiter': 50})
         st.success("✅ Optimization Complete!")
         st.write("Optimized Parameters:", result.x)
         st.write("Final RMSE:", result.fun)
 
         df_progress = pd.DataFrame(progress_data)
         if not df_progress.empty:
+            st.subheader("Optimization Progress")
             st.line_chart(df_progress[['RMSE_Oil', 'RMSE_Water', 'RMSE_Gas', 'RMSE_Total']])
 
         # Final simulation with best-fit parameters
@@ -523,19 +479,30 @@ with tab_history:
             mime="text/csv"
         )
 
-        # Final plots (Oil, Water, Gas)
-        fig, ax = plt.subplots(3, 1, figsize=(8, 10))
-        ax[0].plot(hist_df_local['Days'], hist_df_local['OilRate_STB'], 'ro', label='Historical Oil')
-        ax[0].plot(sim_final['Time (days)'], sim_final['OilRate_STB'], 'b-', label='Simulated Oil')
-        ax[0].set_ylabel("Oil Rate (STB/d)"); ax[0].legend(); ax[0].grid()
+        # --- Plot results: Separate subplots for Oil, Water, Gas ---
+        fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
 
-        ax[1].plot(hist_df_local['Days'], hist_df_local['WaterRate_STB'], 'go', label='Historical Water')
-        ax[1].plot(sim_final['Time (days)'], sim_final['WaterRate_STB'], 'b-', label='Simulated Water')
-        ax[1].set_ylabel("Water Rate (STB/d)"); ax[1].legend(); ax[1].grid()
+        # --- Oil subplot ---
+        axes[0].plot(hist_df_local['Days'], hist_df_local['OilRate_STB'], 'ro', label='Oil Rate (Hist)')
+        axes[0].plot(sim_final['Time (days)'], sim_final['OilRate_STB'], 'r-', label='Oil Rate (Sim)')
+        axes[0].set_ylabel("Oil Rate (STB/day)")
+        axes[0].legend()
+        axes[0].grid(True)
 
-        ax[2].plot(hist_df_local['Days'], hist_df_local['GasRate_MSCF'], 'yo', label='Historical Gas')
-        ax[2].plot(sim_final['Time (days)'], sim_final['GasRate_MSCF'], 'b-', label='Simulated Gas')
-        ax[2].set_ylabel("Gas Rate (MSCF/d)")
-        ax[2].set_xlabel("Days"); ax[2].legend(); ax[2].grid()
+        # --- Water subplot ---
+        axes[1].plot(hist_df_local['Days'], hist_df_local['WaterRate_STB'], 'bo', label='Water Rate (Hist)')
+        axes[1].plot(sim_final['Time (days)'], sim_final['WaterRate_STB'], 'b-', label='Water Rate (Sim)')
+        axes[1].set_ylabel("Water Rate (STB/day)")
+        axes[1].legend()
+        axes[1].grid(True)
 
+        # --- Gas subplot ---
+        axes[2].plot(hist_df_local['Days'], hist_df_local['GasRate_MSCF'], 'go', label='Gas Rate (Hist)')
+        axes[2].plot(sim_final['Time (days)'], sim_final['GasRate_MSCF'], 'g-', label='Gas Rate (Sim)')
+        axes[2].set_ylabel("Gas Rate (MSCF/day)")
+        axes[2].set_xlabel("Time (days)")
+        axes[2].legend()
+        axes[2].grid(True)
+
+        plt.tight_layout()
         st.pyplot(fig)
